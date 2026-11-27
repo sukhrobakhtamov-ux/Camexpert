@@ -27,19 +27,26 @@ state_lock = threading.Lock()
 
 
 # ---------- Работа с файлом состояния ----------
-def load_state():
+def load_devices():
+    """Возвращает словарь {имя_устройства: данные}."""
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return data if isinstance(data, dict) else None
     except (FileNotFoundError, json.JSONDecodeError):
-        return None
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if isinstance(data.get("devices"), dict):
+        return data["devices"]
+    if "wan_ip" in data:  # старый формат (один телефон)
+        return {"phone": data}
+    return {}
 
 
-def save_state(data):
+def save_devices(devices):
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump({"devices": devices}, f, ensure_ascii=False, indent=2)
     os.replace(tmp, STATE_FILE)
 
 
@@ -63,18 +70,22 @@ def update():
     if not isinstance(payload, dict):
         return jsonify({"error": "invalid json"}), 400
 
+    device = str(payload.get("device") or "phone").strip()[:32] or "phone"
     new_data = {k: payload.get(k) for k in FIELDS}
 
     with state_lock:
-        old_data = load_state() or {}
-        save_state(new_data)
+        devices = load_devices()
+        old_data = devices.get(device) or {}
+        devices[device] = new_data
+        save_devices(devices)
 
     old_ip = old_data.get("wan_ip")
     new_ip = new_data.get("wan_ip")
 
     if old_ip and new_ip and old_ip != new_ip:
         text = (
-            "⚠️ <b>Внешний IP изменился!</b>\n\n"
+            "⚠️ <b>Внешний IP изменился!</b>\n"
+            f"📱 Устройство: <b>{esc(device)}</b>\n\n"
             f"Был: <code>{esc(old_ip)}</code>\n"
             f"Стал: <code>{esc(new_ip)}</code>\n"
             f"Сеть: {esc(new_data.get('wifi_name'))}\n"
@@ -101,20 +112,23 @@ def is_admin(message):
 def cmd_info(message):
     if not is_admin(message):
         return
-    data = load_state()
-    if not data:
-        bot.send_message(message.chat.id, "Данных пока нет. Телефон ещё не присылал обновление.")
+    devices = load_devices()
+    if not devices:
+        bot.send_message(message.chat.id, "Данных пока нет. Телефоны ещё не присылали обновление.")
         return
 
-    text = (
-        "🌐 <b>Состояние сети</b>\n\n"
-        f"🔹 Внешний IP: <code>{esc(data.get('wan_ip'))}</code>\n"
-        f"🔹 IP роутера: <code>{esc(data.get('gateway'))}</code>\n"
-        f"🔹 Локальный IP телефона: <code>{esc(data.get('local_ip'))}</code>\n"
-        f"🔹 Wi-Fi: <b>{esc(data.get('wifi_name'))}</b>\n"
-        f"🕒 Обновлено: {esc(data.get('updated_at'))}"
-    )
-    bot.send_message(message.chat.id, text)
+    blocks = []
+    for name in sorted(devices):
+        d = devices[name]
+        blocks.append(
+            f"📱 <b>{esc(name)}</b>\n"
+            f"🔹 Внешний IP: <code>{esc(d.get('wan_ip'))}</code>\n"
+            f"🔹 IP роутера: <code>{esc(d.get('gateway'))}</code>\n"
+            f"🔹 Локальный IP: <code>{esc(d.get('local_ip'))}</code>\n"
+            f"🔹 Wi-Fi: <b>{esc(d.get('wifi_name'))}</b>\n"
+            f"🕒 Обновлено: {esc(d.get('updated_at'))}"
+        )
+    bot.send_message(message.chat.id, "🌐 <b>Состояние сети</b>\n\n" + "\n\n".join(blocks))
 
 
 if __name__ == "__main__":
